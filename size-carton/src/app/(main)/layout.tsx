@@ -75,7 +75,7 @@ export default function MainLayout({
   return (
     <>
       <Header
-        title="조미❤️동현"
+        title="SizeOfCarton"
         rightElement={
           <nav className="flex items-center gap-2">
             {navigationItems.map((item) => {

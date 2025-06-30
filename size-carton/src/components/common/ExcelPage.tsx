@@ -12,6 +12,13 @@ import * as XLSX from "xlsx";
 //   cbm DECIMAL(10, 6)
 // );
 
+// 유효성 검사 오류 타입 정의
+interface ValidationError {
+  rowIndex: number;
+  rowData: unknown[];
+  errors: string[];
+}
+
 export default function ExcelPage() {
   const [tableData, setTableData] = useState<unknown[][]>([]);
   const [isFileUpload, setIsFileUpload] = useState(false);
@@ -19,6 +26,10 @@ export default function ExcelPage() {
   const [dragActive, setDragActive] = useState(false);
   const [fileName, setFileName] = useState<string>("");
   const [uploading, setUploading] = useState(false);
+  const [validationErrors, setValidationErrors] = useState<ValidationError[]>(
+    []
+  );
+  const [showErrors, setShowErrors] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   async function uploadToDB(productData: unknown[]) {
@@ -37,6 +48,8 @@ export default function ExcelPage() {
         setIsFileUpload(false);
         setProductData([]);
         setFileName("");
+        setValidationErrors([]);
+        setShowErrors(false);
         if (fileInputRef.current) {
           fileInputRef.current.value = "";
         }
@@ -50,26 +63,71 @@ export default function ExcelPage() {
     }
   }
 
-  function isValidRow(row: unknown[]): boolean {
-    // 8개 컬럼, Product(1), DIMENSION(2,5), WEIGHT(3,6), CBM(4,7)
-    if (row.length < 8) return false;
-    if (!row[1] || typeof row[1] !== "string") return false;
+  // 유효성 검사 함수 개선 - 오류 상세 정보 반환
+  function validateRow(
+    row: unknown[],
+    rowIndex: number
+  ): ValidationError | null {
+    const errors: string[] = [];
 
-    // DIMENSION: "숫자X숫자X숫자"
-    const dimPattern = /^\d+X\d+X\d+$/;
-    if (!dimPattern.test(String(row[2])) || !dimPattern.test(String(row[5])))
-      return false;
+    // 컬럼 수 검사
+    if (row.length < 8) {
+      errors.push(`컬럼 수가 부족합니다. (현재: ${row.length}개, 필요: 8개)`);
+    }
 
-    // WEIGHT, CBM: 숫자
+    // Product명 검사 (컬럼 1)
     if (
-      isNaN(Number(row[3])) ||
-      isNaN(Number(row[4])) ||
-      isNaN(Number(row[6])) ||
-      isNaN(Number(row[7]))
-    )
-      return false;
+      !row[1] ||
+      typeof row[1] !== "string" ||
+      row[1].toString().trim() === ""
+    ) {
+      errors.push("제품명(2번째 컬럼)이 비어있거나 올바르지 않습니다.");
+    }
 
-    return true;
+    // DIMENSION 형식 검사 (컬럼 2, 5) - 대소문자 x/X 모두 허용
+    const dimPattern = /^\d+[xX]\d+[xX]\d+$/;
+    if (row[2] && !dimPattern.test(String(row[2]))) {
+      errors.push(
+        `CONDENSER 치수(3번째 컬럼) 형식이 올바르지 않습니다. (현재: "${row[2]}", 필요형식: "숫자x숫자x숫자" 또는 "숫자X숫자X숫자")`
+      );
+    }
+    if (row[5] && !dimPattern.test(String(row[5]))) {
+      errors.push(
+        `EVAPORATOR 치수(6번째 컬럼) 형식이 올바르지 않습니다. (현재: "${row[5]}", 필요형식: "숫자x숫자x숫자" 또는 "숫자X숫자X숫자")`
+      );
+    }
+
+    // 숫자 필드 검사 (WEIGHT, CBM)
+    if (row[3] && isNaN(Number(row[3]))) {
+      errors.push(
+        `CONDENSER 무게(4번째 컬럼)가 숫자가 아닙니다. (현재: "${row[3]}")`
+      );
+    }
+    if (row[4] && isNaN(Number(row[4]))) {
+      errors.push(
+        `CONDENSER CBM(5번째 컬럼)이 숫자가 아닙니다. (현재: "${row[4]}")`
+      );
+    }
+    if (row[6] && isNaN(Number(row[6]))) {
+      errors.push(
+        `EVAPORATOR 무게(7번째 컬럼)가 숫자가 아닙니다. (현재: "${row[6]}")`
+      );
+    }
+    if (row[7] && isNaN(Number(row[7]))) {
+      errors.push(
+        `EVAPORATOR CBM(8번째 컬럼)이 숫자가 아닙니다. (현재: "${row[7]}")`
+      );
+    }
+
+    if (errors.length > 0) {
+      return {
+        rowIndex: rowIndex + 2, // +2 because: +1 for 0-based to 1-based, +1 for header row
+        rowData: row,
+        errors,
+      };
+    }
+
+    return null;
   }
 
   const processFile = (file: File) => {
@@ -88,16 +146,31 @@ export default function ExcelPage() {
       // 첫 행(헤더) 제외
       const dataRows = jsonData.slice(1);
 
-      const validRows = dataRows.filter(isValidRow);
+      // 유효성 검사 및 오류 수집
+      const errors: ValidationError[] = [];
+      const validRows: unknown[][] = [];
 
-      if (validRows.length !== dataRows.length) {
-        alert(
-          "⚠️ 엑셀 데이터 형식이 올바르지 않은 행이 있습니다. 확인해주세요."
-        );
+      dataRows.forEach((row, index) => {
+        const validationError = validateRow(row, index);
+        if (validationError) {
+          errors.push(validationError);
+        } else {
+          validRows.push(row);
+        }
+      });
+
+      // 오류가 있는 경우 오류 정보 저장 및 표시
+      if (errors.length > 0) {
+        setValidationErrors(errors);
+        setShowErrors(true);
+        setTableData([]);
+        setProductData([]);
+        setIsFileUpload(false);
         return;
       }
+
+      // 모든 행이 유효한 경우 처리 계속
       const productData = convertRowsToProducts(validRows);
-      // Fix: convert productData (array of objects) to array of arrays for tableData
       const tableRows = productData.map((product) => [
         product.productname,
         product.type,
@@ -110,6 +183,8 @@ export default function ExcelPage() {
       setTableData(tableRows);
       setProductData(productData);
       setIsFileUpload(true);
+      setValidationErrors([]);
+      setShowErrors(false);
     };
     reader.readAsBinaryString(file);
   };
@@ -152,7 +227,9 @@ export default function ExcelPage() {
   };
 
   function parseDimension(dimStr: string) {
-    const [width, height, length] = dimStr.split("X").map(Number);
+    // 대소문자 x/X를 모두 대문자 X로 변환 후 파싱
+    const normalizedDimStr = dimStr.toUpperCase();
+    const [width, height, length] = normalizedDimStr.split("X").map(Number);
     return { width, height, length };
   }
 
@@ -251,7 +328,7 @@ export default function ExcelPage() {
               />
 
               {/* File Name Display */}
-              {fileName && (
+              {fileName && !showErrors && (
                 <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
                   <div className="flex items-center justify-center gap-2">
                     <svg
@@ -276,6 +353,116 @@ export default function ExcelPage() {
             </div>
           </div>
         </div>
+
+        {/* Validation Errors Section */}
+        {showErrors && validationErrors.length > 0 && (
+          <div className="bg-white rounded-2xl shadow-xl border border-red-200 overflow-hidden mb-8">
+            <div className="bg-gradient-to-r from-red-50 to-red-100 px-8 py-4 border-b border-red-200">
+              <div className="flex items-center gap-3">
+                <svg
+                  className="w-6 h-6 text-red-600"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+                <div>
+                  <h3 className="text-xl font-semibold text-red-900">
+                    데이터 유효성 검사 실패
+                  </h3>
+                  <p className="text-red-700">
+                    {validationErrors.length}개 행에서 오류가 발견되었습니다.
+                    아래 내용을 확인하고 수정해주세요.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-8">
+              <div className="space-y-6">
+                {validationErrors.map((error, index) => (
+                  <div
+                    key={index}
+                    className="border border-red-200 rounded-lg p-6 bg-red-50"
+                  >
+                    <div className="flex items-start gap-4">
+                      <div className="flex-shrink-0">
+                        <div className="w-8 h-8 bg-red-600 text-white rounded-full flex items-center justify-center font-bold text-sm">
+                          {error.rowIndex}
+                        </div>
+                      </div>
+                      <div className="flex-1">
+                        <h4 className="text-lg font-semibold text-red-900 mb-3">
+                          {error.rowIndex}번째 행 오류
+                        </h4>
+
+                        {/* 오류 목록 */}
+                        <div className="mb-4">
+                          <h5 className="text-sm font-medium text-red-800 mb-2">
+                            발견된 오류:
+                          </h5>
+                          <ul className="list-disc list-inside space-y-1">
+                            {error.errors.map((errorMsg, i) => (
+                              <li key={i} className="text-sm text-red-700">
+                                {errorMsg}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        {/* 행 데이터 표시 */}
+                        <div>
+                          <h5 className="text-sm font-medium text-red-800 mb-2">
+                            해당 행 데이터:
+                          </h5>
+                          <div className="bg-white rounded border border-red-200 p-3">
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+                              {error.rowData.map((cell, cellIndex) => (
+                                <div key={cellIndex} className="flex">
+                                  <span className="font-medium text-gray-600 mr-2">
+                                    컬럼{cellIndex + 1}:
+                                  </span>
+                                  <span className="text-gray-900">
+                                    {cell === null || cell === undefined
+                                      ? "(비어있음)"
+                                      : String(cell)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* 다시 업로드 버튼 */}
+              <div className="mt-8 text-center">
+                <button
+                  onClick={() => {
+                    setShowErrors(false);
+                    setValidationErrors([]);
+                    setFileName("");
+                    if (fileInputRef.current) {
+                      fileInputRef.current.value = "";
+                    }
+                  }}
+                  className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-8 py-3 rounded-lg font-medium transition-all duration-200 transform hover:scale-105 shadow-lg"
+                >
+                  다른 파일 업로드하기
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Preview Section */}
         {tableData.length > 0 && (
