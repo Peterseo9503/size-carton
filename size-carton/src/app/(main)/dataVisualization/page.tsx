@@ -30,7 +30,8 @@ interface LoadedItem {
   product: Product;
   position: { x: number; y: number; z: number };
   rotation: number;
-  stackCount?: number; // 같은 위치에 쌓인 개수
+  stackCount: number; // 해당 위치에 쌓인 개수
+  stackHeight: number; // 실제 쌓인 높이 (mm)
 }
 
 export default function DataVisualizationPage() {
@@ -44,6 +45,8 @@ export default function DataVisualizationPage() {
   const [optimizedLoad, setOptimizedLoad] = useState<LoadedItem[]>([]);
   const [loadingOptimization, setLoadingOptimization] = useState(false);
   const [unplacedProducts, setUnplacedProducts] = useState<Product[]>([]);
+  const [showUnplaced, setShowUnplaced] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
 
   // Container specifications (high-cube containers)
   const containers: Record<string, Container> = {
@@ -53,7 +56,7 @@ export default function DataVisualizationPage() {
     },
     "40ft": {
       type: "40ft",
-      internal: { width: 2340, height: 2280, length: 12032, volume: 64.15 },
+      internal: { width: 2340, height: 2585, length: 12032, volume: 64.15 },
     },
   };
 
@@ -92,7 +95,12 @@ export default function DataVisualizationPage() {
           ? {
               ...product,
               selected: !product.selected,
-              // 수량은 자동으로 변경하지 않음
+              // 선택할 때 수량이 0이면 1로 설정, 해제할 때는 0으로 설정
+              quantity: !product.selected
+                ? product.quantity === 0
+                  ? 1
+                  : product.quantity
+                : 0,
             }
           : product
       )
@@ -111,7 +119,7 @@ export default function DataVisualizationPage() {
     );
   };
 
-  // 선택된 제품 업데이트 (수량 기반으로 확장)
+  // 선택된 제품 업데이트 (선택되고 수량이 있는 제품만)
   useEffect(() => {
     console.log("Products 상태:", products);
     const expandedProducts: Product[] = [];
@@ -119,7 +127,8 @@ export default function DataVisualizationPage() {
       console.log(
         `제품 ${product.productname}: selected=${product.selected}, quantity=${product.quantity}`
       );
-      if (product.quantity && product.quantity > 0) {
+      // 선택되고 수량이 1 이상인 제품만 포함
+      if (product.selected && product.quantity && product.quantity > 0) {
         console.log(`${product.productname}을 ${product.quantity}개 추가`);
         for (let i = 0; i < product.quantity; i++) {
           expandedProducts.push({
@@ -140,19 +149,23 @@ export default function DataVisualizationPage() {
       prev.map((product) => ({
         ...product,
         selected: !allSelected,
-        // 수량은 기존 값 유지
+        // 선택할 때 수량이 0이면 1로 설정, 해제할 때는 0으로 설정
+        quantity: !allSelected
+          ? product.quantity === 0
+            ? 1
+            : product.quantity
+          : 0,
       }))
     );
   };
 
-  // 개선된 3D 컨테이너 적재 최적화 알고리즘
+  // 완전히 새로운 3D 공간 활용 적재 알고리즘
   const optimizeLoading = () => {
     if (selectedProducts.length === 0) {
       alert("최소 1개 이상의 제품을 선택해주세요.");
       return;
     }
 
-    // 기존 적재 결과 초기화
     setOptimizedLoad([]);
     setUnplacedProducts([]);
     setLoadingOptimization(true);
@@ -160,128 +173,125 @@ export default function DataVisualizationPage() {
     setTimeout(() => {
       const container = containers[selectedContainer];
       const usableSpace = {
-        width: container.internal.width * 0.95,
-        height: container.internal.height * 0.95,
-        length: container.internal.length * 0.95,
+        width: container.internal.width * 0.98,
+        height: container.internal.height * 0.98,
+        length: container.internal.length * 0.98,
       };
+
+      console.log("컨테이너 사용 가능 공간:", usableSpace);
 
       const loaded: LoadedItem[] = [];
+      const unplaced: Product[] = [];
 
-      console.log("선택된 제품들:", selectedProducts);
-
-      // 임시로 간단한 방식으로 되돌림 - 각 제품을 개별적으로 처리
-      const sortedProducts = [...selectedProducts].sort((a, b) => {
-        // 먼저 타입별로 정렬 (EVAPORATOR가 앞으로)
-        if (a.type !== b.type) {
-          return a.type === "EVAPORATOR" ? -1 : 1;
+      // 제품별로 그룹핑
+      const productGroups = selectedProducts.reduce((acc, product) => {
+        const key = `${product.productname}_${product.type}`;
+        if (!acc[key]) {
+          acc[key] = [];
         }
-        // 같은 타입 내에서는 무게 기준 정렬 (무거운 것이 먼저)
-        return b.weight - a.weight;
-      });
+        acc[key].push(product);
+        return acc;
+      }, {} as Record<string, Product[]>);
 
-      console.log("정렬된 제품들:", sortedProducts);
+      console.log("제품 그룹:", productGroups);
 
-      // 충돌 검사 함수
-      const checkCollision = (
-        newPos: { x: number; y: number; z: number },
-        newProduct: Product
-      ) => {
-        return loaded.some((item) => {
-          const existingPos = item.position;
-          const existingProduct = item.product;
+      // 각 제품 그룹별로 최적 배치 계산
+      Object.entries(productGroups).forEach(([groupKey, products]) => {
+        const product = products[0];
+        const totalCount = products.length;
 
-          // 3D 박스 충돌 검사
-          const noOverlapX =
-            newPos.x >= existingPos.x + existingProduct.width ||
-            existingPos.x >= newPos.x + newProduct.width;
-          const noOverlapY =
-            newPos.y >= existingPos.y + existingProduct.height ||
-            existingPos.y >= newPos.y + newProduct.height;
-          const noOverlapZ =
-            newPos.z >= existingPos.z + existingProduct.length ||
-            existingPos.z >= newPos.z + newProduct.length;
+        console.log(`\n=== ${groupKey} 배치 계산 ===`);
+        console.log(
+          `제품 크기: ${product.width} × ${product.height} × ${product.length}mm`
+        );
+        console.log(`총 개수: ${totalCount}개`);
 
-          return !(noOverlapX || noOverlapY || noOverlapZ);
-        });
-      };
+        // 각 방향으로 들어갈 수 있는 개수 계산
+        const maxX = Math.floor(usableSpace.width / product.width);
+        const maxY = Math.floor(usableSpace.height / product.height);
+        const maxZ = Math.floor(usableSpace.length / product.length);
 
-      // 최적 위치 찾기 함수
-      const findOptimalPosition = (product: Product) => {
-        const spacing = 50; // 제품 간 최소 간격 (mm)
+        const maxPossible = maxX * maxY * maxZ;
+        console.log(
+          `이론적 최대 개수: ${maxX} × ${maxY} × ${maxZ} = ${maxPossible}개`
+        );
 
-        // 가능한 모든 위치를 시도해보며 최적 위치 찾기
-        for (
-          let y = 0;
-          y <= usableSpace.height - product.height;
-          y += spacing
-        ) {
-          for (
-            let z = 0;
-            z <= usableSpace.length - product.length;
-            z += spacing
-          ) {
-            for (
-              let x = 0;
-              x <= usableSpace.width - product.width;
-              x += spacing
-            ) {
-              const position = { x, y, z };
+        // 실제 배치할 개수 결정
+        const actualCount = Math.min(totalCount, maxPossible);
+        console.log(`실제 배치 개수: ${actualCount}개`);
 
-              // 컨테이너 경계 체크
-              if (
-                x + product.width <= usableSpace.width &&
-                y + product.height <= usableSpace.height &&
-                z + product.length <= usableSpace.length &&
-                !checkCollision(position, product)
-              ) {
-                return position;
+        // 3D 그리드로 배치
+        let placedCount = 0;
+
+        outerLoop: for (let z = 0; z < maxZ && placedCount < actualCount; z++) {
+          for (let y = 0; y < maxY && placedCount < actualCount; y++) {
+            for (let x = 0; x < maxX && placedCount < actualCount; x++) {
+              const position = {
+                x: x * product.width,
+                y: y * product.height,
+                z: z * product.length,
+              };
+
+              // 현재 위치가 이미 사용된 공간과 겹치는지 확인
+              const isConflict = loaded.some((item) => {
+                const noOverlapX =
+                  position.x >= item.position.x + item.product.width ||
+                  item.position.x >= position.x + product.width;
+                const noOverlapY =
+                  position.y >= item.position.y + item.stackHeight ||
+                  item.position.y >= position.y + product.height;
+                const noOverlapZ =
+                  position.z >= item.position.z + item.product.length ||
+                  item.position.z >= position.z + product.length;
+
+                return !(noOverlapX || noOverlapY || noOverlapZ);
+              });
+
+              if (!isConflict) {
+                loaded.push({
+                  product: {
+                    ...product,
+                    displayIndex: loaded.length + 1,
+                  },
+                  position,
+                  rotation: 0,
+                  stackCount: 1,
+                  stackHeight: product.height,
+                });
+                placedCount++;
+
+                console.log(
+                  `${placedCount}번째 배치: (${position.x}, ${position.y}, ${position.z})`
+                );
               }
             }
           }
         }
 
-        // 최적 위치를 찾지 못한 경우 null 반환
-        return null;
-      };
+        console.log(`최종 배치된 개수: ${placedCount}개`);
 
-      // 각 제품을 순차적으로 배치
-      const unplaced: Product[] = [];
-
-      sortedProducts.forEach((product, index) => {
-        console.log(
-          `처리 중인 제품: ${product.productname} (${index + 1}/${
-            sortedProducts.length
-          })`
-        );
-
-        const position = findOptimalPosition(product);
-
-        if (position) {
-          loaded.push({
-            product: {
-              ...product,
-              displayIndex: loaded.length + 1, // 실제 배치된 순번
-            },
-            position,
-            rotation: 0,
-          });
-          console.log(
-            `배치 성공: ${product.productname} at (${position.x}, ${position.y}, ${position.z})`
-          );
-        } else {
-          unplaced.push(product);
-          console.log(`배치 실패: ${product.productname}`);
+        // 배치되지 못한 제품들을 unplaced에 추가
+        for (let i = placedCount; i < totalCount; i++) {
+          unplaced.push(products[i]);
         }
       });
 
-      console.log("최종 적재 결과:", loaded);
-      console.log("배치되지 못한 제품:", unplaced);
+      console.log("\n=== 최종 결과 ===");
+      console.log("총 배치된 제품:", loaded.length);
+      console.log("배치되지 못한 제품:", unplaced.length);
 
       setOptimizedLoad(loaded);
       setUnplacedProducts(unplaced);
       setLoadingOptimization(false);
     }, 1000);
   };
+
+  // 검색어로 제품 필터링
+  const filteredProducts = products.filter(
+    (product) =>
+      product.productname.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      product.type.toLowerCase().includes(searchTerm.toLowerCase())
+  );
 
   // 선택된 제품들의 총 CBM 계산
   const calculateTotalCBM = () => {
@@ -377,7 +387,7 @@ export default function DataVisualizationPage() {
               {/* Product List */}
               <div className="lg:col-span-2 bg-white rounded-lg shadow-sm border border-gray-200">
                 <div className="p-6 border-b border-gray-200">
-                  <div className="flex justify-between items-center">
+                  <div className="flex justify-between items-center mb-4">
                     <h2 className="text-xl font-bold text-gray-900">
                       제품 선택
                     </h2>
@@ -396,85 +406,133 @@ export default function DataVisualizationPage() {
                       </button>
                     </div>
                   </div>
+
+                  {/* 검색 입력 */}
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                      <svg
+                        className="h-5 w-5 text-gray-400"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                        />
+                      </svg>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="제품명 또는 타입으로 검색..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md leading-5 bg-white placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
                 </div>
 
                 <div className="p-6">
                   <div className="space-y-3 max-h-96 overflow-y-auto">
-                    {products.map((product) => (
-                      <div
-                        key={product.id}
-                        className={`p-4 rounded-lg border transition-all duration-200 ${
-                          product.selected
-                            ? "border-blue-400 bg-blue-50 shadow-md"
-                            : "border-gray-200 hover:border-gray-300 hover:bg-gray-50"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-3 flex-1">
-                            <input
-                              type="checkbox"
-                              checked={product.selected || false}
-                              onChange={() =>
-                                toggleProductSelection(product.id)
-                              }
-                              className="w-4 h-4 text-blue-600"
-                            />
-                            <div className="flex-1">
-                              <div className="font-medium text-gray-900">
-                                {product.productname}
-                              </div>
-                              <div className="text-sm text-gray-500">
-                                {product.width}×{product.height}×
-                                {product.length}mm | {product.weight}kg |{" "}
-                                {product.cbm}m³
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-3">
-                            {/* Quantity Input - 항상 표시 */}
-                            <div className="flex items-center gap-2">
-                              <label className="text-sm text-gray-600">
-                                수량:
-                              </label>
-                              <input
-                                type="number"
-                                min="0"
-                                max="999"
-                                value={product.quantity ?? ""}
-                                onChange={(e) => {
-                                  const value = e.target.value;
-                                  if (value === "") {
-                                    updateProductQuantity(product.id, 0);
-                                  } else {
-                                    const numValue = parseInt(value);
-                                    if (!isNaN(numValue)) {
-                                      updateProductQuantity(
-                                        product.id,
-                                        numValue
-                                      );
-                                    }
-                                  }
-                                }}
-                                onClick={(e) => e.stopPropagation()}
-                                className="w-16 px-2 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                              />
-                              <span className="text-sm text-gray-500">개</span>
-                            </div>
-
-                            <span
-                              className={`px-2 py-1 rounded-full text-xs font-medium ${
-                                product.type === "CONDENSER"
-                                  ? "bg-blue-100 text-blue-800"
-                                  : "bg-green-100 text-green-800"
-                              }`}
-                            >
-                              {product.type}
-                            </span>
-                          </div>
+                    {filteredProducts.length === 0 && searchTerm ? (
+                      <div className="text-center py-8 text-gray-500">
+                        <div className="text-lg mb-2">🔍</div>
+                        <div>
+                          &quot;{searchTerm}&quot;에 대한 검색 결과가 없습니다
+                        </div>
+                        <div className="text-sm">
+                          다른 검색어를 시도해보세요
                         </div>
                       </div>
-                    ))}
+                    ) : filteredProducts.length === 0 ? (
+                      <div className="text-center py-8 text-gray-500">
+                        <div className="text-lg mb-2">📦</div>
+                        <div>제품 데이터가 없습니다</div>
+                        <div className="text-sm">
+                          위의 &apos;제품 데이터 로드&apos; 버튼을 클릭해주세요
+                        </div>
+                      </div>
+                    ) : (
+                      filteredProducts.map((product) => (
+                        <div
+                          key={product.id}
+                          className={`p-4 rounded-lg border transition-all duration-200 ${
+                            product.selected
+                              ? "border-blue-400 bg-blue-50 shadow-md"
+                              : "border-gray-200 hover:border-gray-300 hover:bg-gray-50"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3 flex-1">
+                              <input
+                                type="checkbox"
+                                checked={product.selected || false}
+                                onChange={() =>
+                                  toggleProductSelection(product.id)
+                                }
+                                className="w-4 h-4 text-blue-600"
+                              />
+                              <div className="flex-1">
+                                <div className="font-medium text-gray-900">
+                                  {product.productname}
+                                </div>
+                                <div className="text-sm text-gray-500">
+                                  {product.width}×{product.height}×
+                                  {product.length}mm | {product.weight}kg |{" "}
+                                  {product.cbm}m³
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-3">
+                              {/* Quantity Input - 항상 표시 */}
+                              <div className="flex items-center gap-2">
+                                <label className="text-sm text-gray-600">
+                                  수량:
+                                </label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="999"
+                                  value={product.quantity ?? ""}
+                                  onChange={(e) => {
+                                    const value = e.target.value;
+                                    if (value === "") {
+                                      updateProductQuantity(product.id, 0);
+                                    } else {
+                                      const numValue = parseInt(value);
+                                      if (!isNaN(numValue)) {
+                                        updateProductQuantity(
+                                          product.id,
+                                          numValue
+                                        );
+                                      }
+                                    }
+                                  }}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="w-16 px-2 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                />
+                                <span className="text-sm text-gray-500">
+                                  개
+                                </span>
+                              </div>
+
+                              <span
+                                className={`px-2 py-1 rounded-full text-xs font-medium ${
+                                  product.type === "CONDENSER"
+                                    ? "bg-blue-100 text-blue-800"
+                                    : "bg-green-100 text-green-800"
+                                }`}
+                              >
+                                {product.type}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
                   </div>
                 </div>
               </div>
@@ -642,372 +700,602 @@ export default function DataVisualizationPage() {
             {/* Results Section */}
             {stats && (
               <>
-                {/* 분할 뷰: 왼쪽 컨테이너 요약 + 오른쪽 상세 리스트 */}
-                <div className="grid grid-cols-5 gap-6">
-                  {/* 왼쪽: 컨테이너 요약 및 통계 */}
-                  <div className="col-span-2 space-y-6">
-                    {/* 컨테이너 정보 */}
-                    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                      <h3 className="text-lg font-semibold text-gray-900 mb-4">
-                        {selectedContainer} 컨테이너 정보
-                      </h3>
-                      <div className="space-y-3">
-                        <div className="flex justify-between">
-                          <span className="text-gray-600">내부 치수:</span>
-                          <span className="font-medium text-sm">
-                            {containers[selectedContainer].internal.width} ×{" "}
-                            {containers[selectedContainer].internal.height} ×{" "}
-                            {containers[selectedContainer].internal.length} mm
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-600">내부 용량:</span>
-                          <span className="font-medium">
-                            {containers[selectedContainer].internal.volume} m³
-                          </span>
-                        </div>
+                {/* 컨테이너 적재 시각화 - 전체 너비 사용 */}
+                <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+                  <div className="flex justify-between items-center mb-6">
+                    <h3 className="text-xl font-semibold text-gray-900">
+                      {selectedContainer} 컨테이너 적재 시각화
+                    </h3>
+                    <div className="flex items-center gap-6">
+                      <div className="text-sm text-gray-600">
+                        내부 치수:{" "}
+                        {containers[selectedContainer].internal.width} ×{" "}
+                        {containers[selectedContainer].internal.height} ×{" "}
+                        {containers[selectedContainer].internal.length} mm
                       </div>
-                    </div>
-
-                    {/* 적재 통계 */}
-                    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                      <h3 className="text-lg font-semibold text-gray-900 mb-4">
-                        적재 결과 분석
-                      </h3>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="bg-blue-50 rounded-lg p-4 text-center">
-                          <div className="text-xl font-bold text-blue-600">
-                            {stats.totalItems}
-                          </div>
-                          <div className="text-sm text-blue-600">총 개수</div>
-                        </div>
-                        <div className="bg-green-50 rounded-lg p-4 text-center">
-                          <div className="text-xl font-bold text-green-600">
-                            {stats.totalWeight}kg
-                          </div>
-                          <div className="text-sm text-green-600">총 무게</div>
-                        </div>
-                        <div className="bg-orange-50 rounded-lg p-4 text-center">
-                          <div className="text-xl font-bold text-orange-600">
-                            {stats.volumeRatio}%
-                          </div>
-                          <div className="text-sm text-orange-600">적재율</div>
-                        </div>
-                        <div className="bg-gray-50 rounded-lg p-4 text-center">
-                          <div
-                            className={`text-xl font-bold ${
-                              stats.efficiency === "최적"
-                                ? "text-green-600"
-                                : stats.efficiency === "양호"
-                                ? "text-yellow-600"
-                                : "text-red-600"
-                            }`}
-                          >
-                            {stats.efficiency}
-                          </div>
-                          <div className="text-sm text-gray-600">효율성</div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* 작은 컨테이너 썸네일 */}
-                    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                      <h3 className="text-lg font-semibold text-gray-900 mb-4">
-                        적재 배치도 (상면도)
-                      </h3>
-                      <div className="relative bg-blue-50 rounded-lg p-4 h-64">
-                        <div className="absolute inset-2 border-2 border-blue-300 rounded-lg bg-white/50">
-                          <div className="relative w-full h-full p-1">
-                            {optimizedLoad.map((item, index) => {
-                              const containerWidth =
-                                containers[selectedContainer].internal.width;
-                              const containerLength =
-                                containers[selectedContainer].internal.length;
-
-                              const scaleX = 0.8 / containerWidth;
-                              const scaleZ = 0.8 / containerLength;
-
-                              const productColors = [
-                                "bg-red-400",
-                                "bg-blue-400",
-                                "bg-green-400",
-                                "bg-yellow-400",
-                                "bg-purple-400",
-                                "bg-pink-400",
-                                "bg-indigo-400",
-                                "bg-cyan-400",
-                                "bg-teal-400",
-                                "bg-orange-400",
-                              ];
-
-                              const colorIndex =
-                                (item.product.productname.charCodeAt(0) +
-                                  (item.product.type === "CONDENSER" ? 0 : 5)) %
-                                productColors.length;
-
-                              const boxWidth = Math.max(
-                                item.product.width * scaleX * 100,
-                                3
-                              );
-                              const boxHeight = Math.max(
-                                item.product.length * scaleZ * 100,
-                                3
-                              );
-
-                              return (
-                                <div
-                                  key={index}
-                                  className={`absolute rounded-sm border border-white ${productColors[colorIndex]} opacity-80 hover:opacity-100 transition-opacity flex flex-col items-center justify-center`}
-                                  style={{
-                                    left: `${Math.min(
-                                      item.position.x * scaleX * 100,
-                                      95
-                                    )}%`,
-                                    top: `${Math.min(
-                                      item.position.z * scaleZ * 100,
-                                      95
-                                    )}%`,
-                                    width: `${boxWidth}%`,
-                                    height: `${boxHeight}%`,
-                                    minWidth: "20px",
-                                    minHeight: "20px",
-                                  }}
-                                  title={`#${index + 1} - ${
-                                    item.product.productname
-                                  }${
-                                    item.stackCount
-                                      ? ` (${item.stackCount}개 적재)`
-                                      : ""
-                                  }\n크기: ${item.product.width}×${
-                                    item.product.height
-                                  }×${item.product.length}mm\n무게: ${
-                                    item.product.weight
-                                  }kg${
-                                    item.stackCount
-                                      ? ` × ${item.stackCount} = ${(
-                                          item.product.weight * item.stackCount
-                                        ).toFixed(1)}kg`
-                                      : ""
-                                  }`}
-                                >
-                                  {/* 제품 순번과 개수 */}
-                                  <div className="text-xs font-bold text-white bg-black/40 px-1 rounded mb-1">
-                                    #{index + 1}
-                                    {item.stackCount && item.stackCount > 1
-                                      ? ` (${item.stackCount}개)`
-                                      : ""}
-                                  </div>
-
-                                  {/* 치수 정보 (큰 박스일 때만 표시) */}
-                                  {boxWidth > 8 && boxHeight > 6 && (
-                                    <div className="text-[8px] text-white bg-black/40 px-1 rounded leading-tight text-center">
-                                      <div>
-                                        {item.product.width}×
-                                        {item.product.height}
-                                      </div>
-                                      <div>×{item.product.length}</div>
-                                      {item.stackCount &&
-                                        item.stackCount > 1 && (
-                                          <div className="text-yellow-300 font-bold">
-                                            ↑{item.stackCount}층
-                                          </div>
-                                        )}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                          <div className="absolute bottom-1 right-1 text-xs text-gray-600 bg-white/80 px-1 rounded">
-                            → 운전자석
-                          </div>
-                        </div>
+                      <div className="text-sm text-gray-600">
+                        적재율:{" "}
+                        <span className="font-semibold text-blue-600">
+                          {stats.volumeRatio}%
+                        </span>
                       </div>
                     </div>
                   </div>
 
-                  {/* 오른쪽: 적재된 제품 상세 리스트 */}
-                  <div className="col-span-3">
-                    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                      <div className="flex justify-between items-center mb-6">
-                        <h3 className="text-lg font-semibold text-gray-900">
-                          적재된 제품 상세 목록
-                        </h3>
-                        <div className="text-sm text-gray-500">
-                          총 {optimizedLoad.length}개 제품
-                        </div>
-                      </div>
+                  {/* 컨테이너 세로 뷰 */}
+                  <div
+                    className="relative bg-gray-100 rounded-lg p-8"
+                    style={{ minHeight: "600px" }}
+                  >
+                    {/* 운전석 표시 */}
+                    <div className="absolute top-2 left-1/2 transform -translate-x-1/2 bg-blue-600 text-white px-4 py-2 rounded-lg font-medium">
+                      🚛 운전석 (앞쪽)
+                    </div>
 
-                      <div className="overflow-x-auto">
-                        <table className="min-w-full divide-y divide-gray-200">
-                          <thead className="bg-gray-50">
-                            <tr>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                순번
-                              </th>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                제품명
-                              </th>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                타입
-                              </th>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                크기 (W×H×L)
-                              </th>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                무게
-                              </th>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                CBM
-                              </th>
-                              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                적재 위치 (X,Y,Z)
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody className="bg-white divide-y divide-gray-200">
-                            {optimizedLoad.map((item, index) => {
-                              const productColors = [
-                                "bg-red-100 text-red-800",
-                                "bg-blue-100 text-blue-800",
-                                "bg-green-100 text-green-800",
-                                "bg-yellow-100 text-yellow-800",
-                                "bg-purple-100 text-purple-800",
-                                "bg-pink-100 text-pink-800",
-                                "bg-indigo-100 text-indigo-800",
-                                "bg-cyan-100 text-cyan-800",
-                                "bg-teal-100 text-teal-800",
-                                "bg-orange-100 text-orange-800",
-                              ];
+                    {/* 컨테이너 내부 */}
+                    <div
+                      className="relative mx-auto mt-12 border-4 border-gray-400 bg-white"
+                      style={{
+                        width: "95%",
+                        height: "500px",
+                        borderRadius: "8px",
+                      }}
+                    >
+                      {/* 적재된 제품들 */}
+                      {optimizedLoad.map((item, index) => {
+                        // 같은 X,Z 위치에 있는 다른 제품들 찾기
+                        const samePositionItems = optimizedLoad.filter(
+                          (otherItem) =>
+                            Math.abs(otherItem.position.x - item.position.x) <
+                              10 &&
+                            Math.abs(otherItem.position.z - item.position.z) <
+                              10
+                        );
 
-                              const colorIndex =
-                                (item.product.productname.charCodeAt(0) +
-                                  (item.product.type === "CONDENSER" ? 0 : 5)) %
-                                productColors.length;
+                        const totalAtPosition = samePositionItems.length;
+                        const isBottomItem = samePositionItems.every(
+                          (otherItem) => otherItem.position.y >= item.position.y
+                        );
 
-                              return (
-                                <tr key={index} className="hover:bg-gray-50">
-                                  <td className="px-4 py-4 whitespace-nowrap">
-                                    <span
-                                      className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-sm font-medium ${productColors[colorIndex]}`}
-                                    >
-                                      #{index + 1}
-                                    </span>
-                                  </td>
-                                  <td className="px-4 py-4 whitespace-nowrap">
-                                    <div className="text-sm font-medium text-gray-900">
-                                      {item.product.productname}
-                                      {item.stackCount &&
-                                        item.stackCount > 1 && (
-                                          <span className="ml-2 text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded-full">
-                                            {item.stackCount}개 적재
-                                          </span>
-                                        )}
-                                    </div>
-                                  </td>
-                                  <td className="px-4 py-4 whitespace-nowrap">
-                                    <span
-                                      className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                                        item.product.type === "CONDENSER"
-                                          ? "bg-blue-100 text-blue-800"
-                                          : "bg-green-100 text-green-800"
-                                      }`}
-                                    >
-                                      {item.product.type === "CONDENSER"
-                                        ? "콘덴서"
-                                        : "에바포레이터"}
-                                    </span>
-                                  </td>
-                                  <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
-                                    {item.product.width}×{item.product.height}×
-                                    {item.product.length}
-                                  </td>
-                                  <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
-                                    {item.product.weight}kg
-                                    {item.stackCount && item.stackCount > 1 && (
-                                      <div className="text-xs text-gray-500">
-                                        × {item.stackCount} ={" "}
-                                        {(
-                                          item.product.weight * item.stackCount
-                                        ).toFixed(1)}
-                                        kg
-                                      </div>
-                                    )}
-                                  </td>
-                                  <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
-                                    {item.product.cbm}m³
-                                    {item.stackCount && item.stackCount > 1 && (
-                                      <div className="text-xs text-gray-500">
-                                        × {item.stackCount} ={" "}
-                                        {(
-                                          item.product.cbm * item.stackCount
-                                        ).toFixed(3)}
-                                        m³
-                                      </div>
-                                    )}
-                                  </td>
-                                  <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">
-                                    ({Math.round(item.position.x)},{" "}
-                                    {Math.round(item.position.y)},{" "}
-                                    {Math.round(item.position.z)})
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
+                        // 위에 다른 제품이 있는지 확인
+                        const hasOtherProductAbove = samePositionItems.some(
+                          (otherItem) =>
+                            otherItem.position.y > item.position.y &&
+                            otherItem.product.productname !==
+                              item.product.productname
+                        );
 
+                        // 가장 아래 제품만 표시 (겹침 방지)
+                        if (!isBottomItem) return null;
+                        // 제품명으로 색상 결정 (다른 제품이 위에 있으면 어두운 색상)
+                        const getProductColor = (
+                          productName: string,
+                          type: string,
+                          hasOtherAbove: boolean = false
+                        ) => {
+                          const normalColors = [
+                            {
+                              bg: "bg-red-400",
+                              border: "border-red-600",
+                              text: "text-red-900",
+                            },
+                            {
+                              bg: "bg-blue-400",
+                              border: "border-blue-600",
+                              text: "text-blue-900",
+                            },
+                            {
+                              bg: "bg-green-400",
+                              border: "border-green-600",
+                              text: "text-green-900",
+                            },
+                            {
+                              bg: "bg-yellow-400",
+                              border: "border-yellow-600",
+                              text: "text-yellow-900",
+                            },
+                            {
+                              bg: "bg-purple-400",
+                              border: "border-purple-600",
+                              text: "text-purple-900",
+                            },
+                            {
+                              bg: "bg-pink-400",
+                              border: "border-pink-600",
+                              text: "text-pink-900",
+                            },
+                            {
+                              bg: "bg-indigo-400",
+                              border: "border-indigo-600",
+                              text: "text-indigo-900",
+                            },
+                            {
+                              bg: "bg-cyan-400",
+                              border: "border-cyan-600",
+                              text: "text-cyan-900",
+                            },
+                            {
+                              bg: "bg-teal-400",
+                              border: "border-teal-600",
+                              text: "text-teal-900",
+                            },
+                            {
+                              bg: "bg-orange-400",
+                              border: "border-orange-600",
+                              text: "text-orange-900",
+                            },
+                          ];
+
+                          const darkColors = [
+                            {
+                              bg: "bg-red-700",
+                              border: "border-red-800",
+                              text: "text-red-100",
+                            },
+                            {
+                              bg: "bg-blue-700",
+                              border: "border-blue-800",
+                              text: "text-blue-100",
+                            },
+                            {
+                              bg: "bg-green-700",
+                              border: "border-green-800",
+                              text: "text-green-100",
+                            },
+                            {
+                              bg: "bg-yellow-700",
+                              border: "border-yellow-800",
+                              text: "text-yellow-100",
+                            },
+                            {
+                              bg: "bg-purple-700",
+                              border: "border-purple-800",
+                              text: "text-purple-100",
+                            },
+                            {
+                              bg: "bg-pink-700",
+                              border: "border-pink-800",
+                              text: "text-pink-100",
+                            },
+                            {
+                              bg: "bg-indigo-700",
+                              border: "border-indigo-800",
+                              text: "text-indigo-100",
+                            },
+                            {
+                              bg: "bg-cyan-700",
+                              border: "border-cyan-800",
+                              text: "text-cyan-100",
+                            },
+                            {
+                              bg: "bg-teal-700",
+                              border: "border-teal-800",
+                              text: "text-teal-100",
+                            },
+                            {
+                              bg: "bg-orange-700",
+                              border: "border-orange-800",
+                              text: "text-orange-100",
+                            },
+                          ];
+
+                          // 제품명과 타입을 조합하여 색상 인덱스 생성
+                          const hash = (productName + type)
+                            .split("")
+                            .reduce((a, b) => {
+                              a = (a << 5) - a + b.charCodeAt(0);
+                              return a & a;
+                            }, 0);
+
+                          const colors = hasOtherAbove
+                            ? darkColors
+                            : normalColors;
+                          return colors[Math.abs(hash) % colors.length];
+                        };
+
+                        const containerWidth =
+                          containers[selectedContainer].internal.width;
+                        const containerLength =
+                          containers[selectedContainer].internal.length;
+
+                        // 컨테이너 내부 영역의 픽셀 크기 (고정값 사용)
+                        const containerPixelWidth = 800; // 고정 가로 크기
+                        const containerPixelHeight = 500; // 고정 높이
+
+                        // 실제 적재 위치 계산 (세로 뷰로 변환)
+                        const pixelX =
+                          (item.position.z / containerLength) *
+                          containerPixelWidth; // z축이 가로
+                        const pixelY =
+                          (item.position.x / containerWidth) *
+                          containerPixelHeight; // x축이 세로
+
+                        // 박스 크기 계산
+                        const boxWidth = Math.max(
+                          (item.product.length / containerLength) *
+                            containerPixelWidth,
+                          30
+                        );
+                        const boxHeight = Math.max(
+                          (item.product.width / containerWidth) *
+                            containerPixelHeight,
+                          30
+                        );
+
+                        const colorScheme = getProductColor(
+                          item.product.productname,
+                          item.product.type,
+                          hasOtherProductAbove
+                        );
+
+                        return (
+                          <div key={index}>
+                            {/* 메인 제품 박스 */}
+                            <div
+                              className={`absolute ${colorScheme.bg} ${colorScheme.border} border-2 rounded-lg shadow-lg hover:shadow-xl transition-all duration-200 flex flex-col items-center justify-center overflow-hidden`}
+                              style={{
+                                left: `${Math.min(
+                                  pixelX,
+                                  containerPixelWidth - boxWidth
+                                )}px`,
+                                top: `${Math.min(
+                                  pixelY,
+                                  containerPixelHeight - boxHeight
+                                )}px`,
+                                width: `${boxWidth}px`,
+                                height: `${boxHeight}px`,
+                                minWidth: "40px",
+                                minHeight: "40px",
+                              }}
+                              title={`${item.product.productname} (${
+                                item.product.type
+                              })\n크기: ${item.product.width}×${
+                                item.product.height
+                              }×${item.product.length}mm\n무게: ${
+                                item.product.weight
+                              }kg\n위치: (${Math.round(
+                                item.position.x
+                              )}, ${Math.round(item.position.y)}, ${Math.round(
+                                item.position.z
+                              )})`}
+                            >
+                              {/* 제품명 */}
+                              <div
+                                className={`text-xs font-bold ${colorScheme.text} text-center px-1 leading-tight`}
+                              >
+                                {item.product.productname}
+                              </div>
+
+                              {/* 타입 표시 */}
+                              <div
+                                className={`text-[10px] ${colorScheme.text} opacity-80 text-center`}
+                              >
+                                {item.product.type === "CONDENSER"
+                                  ? "콘덴서"
+                                  : "에바포레이터"}
+                              </div>
+
+                              {/* 같은 위치 총 개수 표시 */}
+                              {totalAtPosition > 1 && (
+                                <div className="bg-black/80 text-white text-xs px-2 py-1 rounded-full mt-1 font-bold">
+                                  {totalAtPosition}개
+                                </div>
+                              )}
+
+                              {/* 순번 */}
+                              <div className="absolute top-1 left-1 bg-black/70 text-white text-xs w-5 h-5 rounded-full flex items-center justify-center font-bold">
+                                {index + 1}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      {/* 컨테이너가 비어있을 때 */}
                       {optimizedLoad.length === 0 && (
-                        <div className="text-center py-12 text-gray-500">
-                          적재 최적화를 실행하면 결과가 여기에 표시됩니다.
+                        <div className="absolute inset-0 flex items-center justify-center text-gray-400">
+                          <div className="text-center">
+                            <div className="text-2xl mb-2">📦</div>
+                            <div>
+                              적재 최적화를 실행하면 결과가 여기에 표시됩니다
+                            </div>
+                          </div>
                         </div>
                       )}
                     </div>
 
-                    {/* 배치되지 못한 제품들 */}
-                    {unplacedProducts.length > 0 && (
-                      <div className="mt-6 bg-red-50 border border-red-200 rounded-lg p-4">
-                        <h4 className="text-lg font-semibold text-red-800 mb-3">
-                          배치되지 못한 제품 ({unplacedProducts.length}개)
-                        </h4>
-                        <div className="text-sm text-red-700 mb-3">
-                          다음 제품들은 컨테이너에 공간이 부족하여 배치할 수
-                          없습니다:
-                        </div>
-                        <div className="space-y-2">
-                          {unplacedProducts.map((product, index) => (
-                            <div
-                              key={`unplaced-${product.id}-${index}`}
-                              className="bg-white rounded-md p-3 border border-red-200"
+                    {/* 뒤쪽 표시 */}
+                    <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 bg-gray-600 text-white px-4 py-2 rounded-lg">
+                      뒤쪽 (문)
+                    </div>
+                  </div>
+                </div>
+
+                {/* 통계 및 상세 정보 */}
+                <div className="grid grid-cols-4 gap-6 mb-6">
+                  {/* 적재 통계 */}
+                  <div className="bg-blue-50 rounded-lg p-4 text-center">
+                    <div className="text-2xl font-bold text-blue-600">
+                      {stats.totalItems}
+                    </div>
+                    <div className="text-sm text-blue-600">총 개수</div>
+                  </div>
+                  <div className="bg-green-50 rounded-lg p-4 text-center">
+                    <div className="text-2xl font-bold text-green-600">
+                      {stats.totalWeight}kg
+                    </div>
+                    <div className="text-sm text-green-600">총 무게</div>
+                  </div>
+                  <div className="bg-orange-50 rounded-lg p-4 text-center">
+                    <div className="text-2xl font-bold text-orange-600">
+                      {stats.volumeRatio}%
+                    </div>
+                    <div className="text-sm text-orange-600">적재율</div>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-4 text-center">
+                    <div
+                      className={`text-2xl font-bold ${
+                        stats.efficiency === "최적"
+                          ? "text-green-600"
+                          : stats.efficiency === "양호"
+                          ? "text-yellow-600"
+                          : "text-red-600"
+                      }`}
+                    >
+                      {stats.efficiency}
+                    </div>
+                    <div className="text-sm text-gray-600">효율성</div>
+                  </div>
+                </div>
+
+                {/* 상세 정보 */}
+                <div className="grid grid-cols-1 gap-6">
+                  {/* 적재된 제품 상세 리스트 */}
+                  <div>
+                    <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+                      {/* 탭 헤더 */}
+                      <div className="border-b border-gray-200">
+                        <nav className="flex space-x-8 px-6" aria-label="Tabs">
+                          <button
+                            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                              !showUnplaced
+                                ? "border-blue-500 text-blue-600"
+                                : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                            }`}
+                            onClick={() => setShowUnplaced(false)}
+                          >
+                            적재된 제품 ({optimizedLoad.length}개)
+                          </button>
+                          {unplacedProducts.length > 0 && (
+                            <button
+                              className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                                showUnplaced
+                                  ? "border-red-500 text-red-600"
+                                  : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                              }`}
+                              onClick={() => setShowUnplaced(true)}
                             >
-                              <div className="flex justify-between items-center">
-                                <div>
-                                  <span className="font-medium text-gray-900">
-                                    {product.productname}
-                                  </span>
-                                  <span className="ml-2 text-sm text-gray-600">
-                                    (
-                                    {product.type === "CONDENSER"
-                                      ? "콘덴서"
-                                      : "에바포레이터"}
-                                    )
-                                  </span>
-                                </div>
-                                <div className="text-sm text-gray-500">
-                                  {product.width}×{product.height}×
-                                  {product.length}mm ({product.weight}kg)
-                                </div>
+                              배치 실패 ({unplacedProducts.length}개)
+                            </button>
+                          )}
+                        </nav>
+                      </div>
+
+                      {/* 탭 컨텐츠 */}
+                      <div className="p-6">
+                        {!showUnplaced ? (
+                          // 적재된 제품 목록
+                          <div>
+                            <div className="flex justify-between items-center mb-4">
+                              <h3 className="text-lg font-semibold text-gray-900">
+                                적재된 제품 상세 목록
+                              </h3>
+                              <div className="text-sm text-gray-500">
+                                총 {optimizedLoad.length}개 제품
                               </div>
                             </div>
-                          ))}
-                        </div>
-                        <div className="mt-3 text-sm text-red-600">
-                          💡 팁: 더 큰 컨테이너를 선택하거나 일부 제품을
-                          제외해보세요.
-                        </div>
+
+                            <div className="overflow-x-auto max-h-96">
+                              <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-gray-50 sticky top-0 z-10">
+                                  <tr>
+                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
+                                      순번
+                                    </th>
+                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
+                                      제품명
+                                    </th>
+                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
+                                      타입
+                                    </th>
+                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
+                                      크기 (W×H×L)
+                                    </th>
+                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
+                                      무게
+                                    </th>
+                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
+                                      CBM
+                                    </th>
+                                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
+                                      적재 위치 (X,Y,Z)
+                                    </th>
+                                  </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                  {optimizedLoad.map((item, index) => {
+                                    const productColors = [
+                                      "bg-red-100 text-red-800",
+                                      "bg-blue-100 text-blue-800",
+                                      "bg-green-100 text-green-800",
+                                      "bg-yellow-100 text-yellow-800",
+                                      "bg-purple-100 text-purple-800",
+                                      "bg-pink-100 text-pink-800",
+                                      "bg-indigo-100 text-indigo-800",
+                                      "bg-cyan-100 text-cyan-800",
+                                      "bg-teal-100 text-teal-800",
+                                      "bg-orange-100 text-orange-800",
+                                    ];
+
+                                    const colorIndex =
+                                      (item.product.productname.charCodeAt(0) +
+                                        (item.product.type === "CONDENSER"
+                                          ? 0
+                                          : 5)) %
+                                      productColors.length;
+
+                                    return (
+                                      <tr
+                                        key={index}
+                                        className="hover:bg-gray-50"
+                                      >
+                                        <td className="px-4 py-4 whitespace-nowrap">
+                                          <span
+                                            className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-sm font-medium ${productColors[colorIndex]}`}
+                                          >
+                                            #{index + 1}
+                                          </span>
+                                        </td>
+                                        <td className="px-4 py-4 whitespace-nowrap">
+                                          <div className="text-sm font-medium text-gray-900">
+                                            {item.product.productname}
+                                            {item.stackCount &&
+                                              item.stackCount > 1 && (
+                                                <span className="ml-2 text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded-full">
+                                                  {item.stackCount}개 적재
+                                                </span>
+                                              )}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 py-4 whitespace-nowrap">
+                                          <span
+                                            className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                                              item.product.type === "CONDENSER"
+                                                ? "bg-blue-100 text-blue-800"
+                                                : "bg-green-100 text-green-800"
+                                            }`}
+                                          >
+                                            {item.product.type === "CONDENSER"
+                                              ? "콘덴서"
+                                              : "에바포레이터"}
+                                          </span>
+                                        </td>
+                                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
+                                          {item.product.width}×
+                                          {item.product.height}×
+                                          {item.product.length}
+                                        </td>
+                                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
+                                          {item.product.weight}kg
+                                          {item.stackCount &&
+                                            item.stackCount > 1 && (
+                                              <div className="text-xs text-gray-500">
+                                                × {item.stackCount} ={" "}
+                                                {(
+                                                  item.product.weight *
+                                                  item.stackCount
+                                                ).toFixed(1)}
+                                                kg
+                                              </div>
+                                            )}
+                                        </td>
+                                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-900">
+                                          {item.product.cbm}m³
+                                          {item.stackCount &&
+                                            item.stackCount > 1 && (
+                                              <div className="text-xs text-gray-500">
+                                                × {item.stackCount} ={" "}
+                                                {(
+                                                  item.product.cbm *
+                                                  item.stackCount
+                                                ).toFixed(3)}
+                                                m³
+                                              </div>
+                                            )}
+                                        </td>
+                                        <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">
+                                          ({Math.round(item.position.x)},{" "}
+                                          {Math.round(item.position.y)},{" "}
+                                          {Math.round(item.position.z)})
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+
+                            {optimizedLoad.length === 0 && (
+                              <div className="text-center py-12 text-gray-500">
+                                적재 최적화를 실행하면 결과가 여기에 표시됩니다.
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          // 배치되지 못한 제품들
+                          <div>
+                            <div className="flex justify-between items-center mb-4">
+                              <h3 className="text-lg font-semibold text-red-800">
+                                배치되지 못한 제품
+                              </h3>
+                              <div className="text-sm text-red-600">
+                                총 {unplacedProducts.length}개 제품
+                              </div>
+                            </div>
+
+                            <div className="text-sm text-red-700 mb-4">
+                              다음 제품들은 컨테이너에 공간이 부족하여 배치할 수
+                              없습니다:
+                            </div>
+
+                            <div className="space-y-3 max-h-96 overflow-y-auto">
+                              {unplacedProducts.map((product, index) => (
+                                <div
+                                  key={`unplaced-${product.id}-${index}`}
+                                  className="bg-red-50 rounded-md p-4 border border-red-200 hover:bg-red-100 transition-colors"
+                                >
+                                  <div className="flex justify-between items-center">
+                                    <div className="flex-1">
+                                      <div className="flex items-center gap-2 mb-1">
+                                        <span className="font-medium text-gray-900">
+                                          {product.productname}
+                                        </span>
+                                        <span
+                                          className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                                            product.type === "CONDENSER"
+                                              ? "bg-blue-100 text-blue-800"
+                                              : "bg-green-100 text-green-800"
+                                          }`}
+                                        >
+                                          {product.type === "CONDENSER"
+                                            ? "콘덴서"
+                                            : "에바포레이터"}
+                                        </span>
+                                      </div>
+                                      <div className="text-sm text-gray-600">
+                                        크기: {product.width}×{product.height}×
+                                        {product.length}mm
+                                      </div>
+                                      <div className="text-sm text-gray-600">
+                                        무게: {product.weight}kg | CBM:{" "}
+                                        {product.cbm}m³
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+
+                            <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                              <div className="text-sm text-yellow-800">
+                                💡 팁: 더 큰 컨테이너를 선택하거나 일부 제품을
+                                제외해보세요.
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    )}
+                    </div>
                   </div>
                 </div>
               </>
